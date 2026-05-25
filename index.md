@@ -15,7 +15,7 @@ dotnet add package Microsoft.Accordant
 ```
 
 > [!div class="nextstepaction"]
-> [Quick Start](docs/quickstart.md)
+> [Get Started](docs/index.md#get-started)
 
 ---
 
@@ -46,7 +46,8 @@ Accordant flips this. **The spec holds the truth.** Whether you generate a thous
 Here's a spec for a bank account:
 
 ```csharp
-public class BankState : JsonState
+[State]
+public partial class BankState
 {
     public Dictionary<string, decimal> Accounts { get; set; } = new();
 }
@@ -97,7 +98,7 @@ And every single one validated against your spec.
 
 ## Next Steps
 
-- **[Quick Start](docs/quickstart.md)** — See it work in 5 minutes
+- **[Overview](docs/index.md)** — Full introduction to Accordant
 - **[Your First Spec](docs/tutorials/01-your-first-spec.md)** — Build a spec step by step
 - **[Concepts](docs/concepts/understanding-state.md)** — How test generation works
 - **[API Reference](api/)** — Generated from XML doc comments

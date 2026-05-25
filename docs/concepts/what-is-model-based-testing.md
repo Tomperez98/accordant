@@ -57,7 +57,8 @@ An **operation** is anything that changes or observes state — an API endpoint,
 
 ```csharp
 // The state: just a dictionary of account balances
-public class BankState : JsonState
+[State]
+public partial class BankState
 {
     public Dictionary<string, decimal> Accounts { get; set; } = new();
 }
@@ -278,6 +279,6 @@ These are advanced topics for when you need them. The core idea is simpler: **a 
 
 You've learned what model-based testing is and why it matters. Ready to try it?
 
-- **See it in action** → [Quick Start](../quickstart.md) — run tests in 5 minutes
+- **See it in action** → [Overview](../index.md#get-started) — get started in minutes
 - **Build your first spec** → [Tutorial 1: Your First Spec](../tutorials/01-your-first-spec.md) — learn the fundamentals
 - **Understand state deeply** → [Understanding State](understanding-state.md) — the foundation of everything

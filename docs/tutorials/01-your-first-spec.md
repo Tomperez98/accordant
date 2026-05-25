@@ -11,7 +11,7 @@ In this tutorial, you'll build a complete Accordant specification for a **TodoLi
 - How to run auto-generated tests
 
 **Prerequisites:**
-- Completed the [Quick Start](../quickstart.md) (or familiar with basic C#)
+- Familiar with basic C# (see the [Overview](../index.md) for an introduction)
 - The TodoList sample project (we'll guide you through it)
 
 ---
@@ -45,31 +45,34 @@ For a TodoList, we need to know:
 - Each todo's title and completion status
 
 ```csharp
-public class AppState : JsonState
+[State]
+public partial class AppState
 {
     /// <summary>
     /// Dictionary of users. Key = userId, Value = user data with their todos.
     /// </summary>
     public Dictionary<string, UserState> Users { get; set; } = new();
+}
 
-    public class UserState
-    {
-        public string Name { get; set; } = string.Empty;
-        public Dictionary<string, TodoState> Todos { get; set; } = new();
-    }
+[State]
+public partial class UserState
+{
+    public string Name { get; set; } = string.Empty;
+    public Dictionary<string, TodoState> Todos { get; set; } = new();
+}
 
-    public class TodoState
-    {
-        public string Title { get; set; } = string.Empty;
-        public bool Completed { get; set; } = false;
-    }
+[State]
+public partial class TodoState
+{
+    public string Title { get; set; } = string.Empty;
+    public bool Completed { get; set; } = false;
 }
 ```
 
-### Why JsonState?
+### Why [State]?
 
-`JsonState` is a base class that provides:
-- **Automatic cloning** (via JSON serialization)
+The `[State]` attribute triggers source generation that provides:
+- **Automatic cloning** (deep copy of your state)
 - **Automatic equality comparison** (for state deduplication)
 - **Automatic hashing** (for state graph exploration)
 
@@ -103,20 +106,18 @@ private static Spec<AppState> CreateSpec()
         }
 
         // Case 2: User doesn't exist → Create it
-        var newState = (AppState)state.Clone();
-        newState.Users[request.UserId] = new AppState.UserState
-        {
-            Name = request.Name,
-            Todos = new()
-        };
-
         return Expect.That<ApiResult<User>>(
                    r => r.IsSuccess &&
                         r.Data != null &&
                         r.Data.UserId == request.UserId &&
                         r.Data.Name == request.Name,
                    $"Should return 200 OK with created user '{request.UserId}'")
-               .ThenState(newState);  // State changes on success
+               .ThenState<AppState>(nextState =>
+                   nextState.Users[request.UserId] = new UserState
+                   {
+                       Name = request.Name,
+                       Todos = new()
+                   });  // State changes on success
     });
 
     // ... more operations ...
@@ -134,12 +135,16 @@ private static Spec<AppState> CreateSpec()
 5. **`.SameState()`** - The operation doesn't modify state (error case, or read-only)
 6. **`.ThenState(newState)`** - The operation transitions to a new state
 
-### The Pattern: Clone-Modify-Return
+### The ThenState Pattern
 
-When state changes, always:
-1. **Clone** the current state: `var newState = (AppState)state.Clone();`
-2. **Modify** the clone: `newState.Users[...] = ...;`
-3. **Return** with `.ThenState(newState)`
+When state changes, use `.ThenState<T>(nextState => ...)` which:
+1. **Clones** the current state automatically
+2. **Passes** the clone to your lambda for modification
+3. **Returns** the modified clone as the next state
+
+```csharp
+.ThenState<AppState>(nextState => nextState.Users[...] = ...)
+```
 
 Never modify the original state directly!
 
@@ -184,12 +189,10 @@ spec.Operation<string, int>("DeleteUser", (userId, state) =>
                .SameState();
     }
 
-    var newState = (AppState)state.Clone();
-    newState.Users.Remove(userId);  // Remove user and all their todos
-
     return Expect.That<int>(s => s == 204, 
                $"Should return 204 No Content")
-           .ThenState(newState);
+           .ThenState<AppState>(nextState =>
+               nextState.Users.Remove(userId));  // Remove user and all their todos
 });
 
 // ---------------------------------------------------------
@@ -213,13 +216,6 @@ spec.Operation<Todo, ApiResult<Todo>>("CreateTodo", (request, state) =>
                .SameState();
     }
 
-    var newState = (AppState)state.Clone();
-    newState.Users[request.UserId].Todos[request.TodoId] = new AppState.TodoState
-    {
-        Title = request.Title,
-        Completed = false
-    };
-
     return Expect.That<ApiResult<Todo>>(
                r => r.IsSuccess &&
                     r.Data != null &&
@@ -227,7 +223,12 @@ spec.Operation<Todo, ApiResult<Todo>>("CreateTodo", (request, state) =>
                     r.Data.Title == request.Title &&
                     r.Data.Completed == false,
                $"Should return 200 OK with created todo")
-           .ThenState(newState);
+           .ThenState<AppState>(nextState =>
+               nextState.Users[request.UserId].Todos[request.TodoId] = new TodoState
+               {
+                   Title = request.Title,
+                   Completed = false
+               });
 });
 
 // ---------------------------------------------------------
@@ -371,7 +372,7 @@ This tells you:
 
 You've learned the core Accordant workflow:
 
-1. **Define State** - `JsonState` subclass tracking what matters
+1. **Define State** - `[State]` partial class tracking what matters
 2. **Define Operations** - `spec.Operation<TReq, TResp>(...)` with `Expect.That(...)`
 3. **Bind Execution** - `spec.ExecuteWith<T>().BindAsync(...)`
 4. **Configure & Run** - `ProvideTargetAndInitialState`, `InputSet`, `RunTests`
@@ -379,8 +380,8 @@ You've learned the core Accordant workflow:
 ### Key Concepts
 
 | Concept | Purpose |
-|---------|---------|
-| `JsonState` | Base class for state with auto clone/compare/hash |
+|---------|----------|
+| `[State]` | Attribute for state classes with auto clone/compare/hash |
 | `Expect.That<T>()` | Declare expected response |
 | `.SameState()` | Operation doesn't change state |
 | `.ThenState(newState)` | Operation transitions to new state |
@@ -401,6 +402,6 @@ You've learned the core Accordant workflow:
 ## Full Code Reference
 
 See the complete TodoList sample:
-- [TodoListTests.cs](../../Samples/TodoList/TodoList.Tests/TodoListTests.cs) - Complete spec
-- [TodoApiClient.cs](../../Samples/TodoList/TodoList.Tests/TodoApiClient.cs) - HTTP client
-- [TodoServiceFactory.cs](../../Samples/TodoList/TodoList.Tests/TodoServiceFactory.cs) - Test server setup
+- [TodoListTests.cs](https://github.com/microsoft/accordant/blob/main/Samples/TodoList/TodoList.Tests/TodoListTests.cs) - Complete spec
+- [TodoApiClient.cs](https://github.com/microsoft/accordant/blob/main/Samples/TodoList/TodoList.Tests/TodoApiClient.cs) - HTTP client
+- [TodoServiceFactory.cs](https://github.com/microsoft/accordant/blob/main/Samples/TodoList/TodoList.Tests/TodoServiceFactory.cs) - Test server setup

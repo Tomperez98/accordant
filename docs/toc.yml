@@ -1,9 +1,9 @@
 - name: Overview
   href: index.md
-- name: Quick Start
-  href: quickstart.md
 - name: Tutorials
   items:
+    - name: Overview
+      href: tutorials/index.md
     - name: Your First Spec
       href: tutorials/01-your-first-spec.md
     - name: Handling Errors
@@ -18,6 +18,8 @@
       href: tutorials/06-async-operations-polling.md
 - name: Concepts
   items:
+    - name: Overview
+      href: concepts/index.md
     - name: What is Model-Based Testing?
       href: concepts/what-is-model-based-testing.md
     - name: Understanding State
@@ -34,5 +36,21 @@
       href: concepts/conformance-testing.md
     - name: Models vs Fakes
       href: concepts/models-vs-fakes.md
-- name: Migration Guide
-  href: MIGRATION_GUIDE.md
+- name: How-To Guides
+  items:
+    - name: Overview
+      href: how-to/index.md
+    - name: Better Error Messages
+      href: how-to/better-error-messages.md
+    - name: Test Logs
+      href: how-to/test-logs.md
+    - name: Indefinite Failures
+      href: how-to/indefinite-failures.md
+    - name: Validating Your Model
+      href: how-to/validating-your-model.md
+    - name: Modeling Large Data
+      href: how-to/modeling-large-data.md
+    - name: Resetting State
+      href: how-to/resetting-state.md
+- name: Samples
+  href: samples.md

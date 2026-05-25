@@ -51,7 +51,8 @@ Invalid outcome (BUG!):
 Let's define a booking spec:
 
 ```csharp
-public class BookingState : JsonState
+[State]
+public partial class BookingState
 {
     /// <summary>
     /// Key = slotId, Value = customer name (null if available)
@@ -71,13 +72,11 @@ private static Spec<BookingState> CreateSpec()
                        "Slot already exists")
                    .SameState();
 
-        var newState = (BookingState)state.Clone();
-        newState.Slots[slotId] = null;  // null = available
-
         return Expect.That<ApiResult<Slot>>(
                    r => r.IsSuccess && r.Data.IsAvailable,
                    "Should create available slot")
-               .ThenState(newState);
+               .ThenState<BookingState>(nextState =>
+                   nextState.Slots[slotId] = null);  // null = available
     });
 
     // BOOK SLOT - The critical concurrent operation!
@@ -96,15 +95,13 @@ private static Spec<BookingState> CreateSpec()
                    .SameState();
 
         // Available - book it!
-        var newState = (BookingState)state.Clone();
-        newState.Slots[slotId] = customer;
-
         return Expect.That<ApiResult<Slot>>(
                    r => r.IsSuccess && 
                         r.Data.BookedBy == customer &&
                         !r.Data.IsAvailable,
                    $"Should book slot for '{customer}'")
-               .ThenState(newState);
+               .ThenState<BookingState>(nextState =>
+                   nextState.Slots[slotId] = customer);
     });
 
     // ... bind to API ...
@@ -307,5 +304,5 @@ You don't write concurrent test cases manually. Define the operations and inputs
 ## Full Code Reference
 
 See the complete Booking sample:
-- [BookingTests.cs](../../Samples/Booking/Booking.Tests/BookingTests.cs) - Complete concurrent tests
-- [BookingApiClient.cs](../../Samples/Booking/Booking.Tests/BookingApiClient.cs) - HTTP client
+- [BookingTests.cs](https://github.com/microsoft/accordant/blob/main/Samples/Booking/Booking.Tests/BookingTests.cs) - Complete concurrent tests
+- [BookingApiClient.cs](https://github.com/microsoft/accordant/blob/main/Samples/Booking/Booking.Tests/BookingApiClient.cs) - HTTP client

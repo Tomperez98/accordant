@@ -15,7 +15,7 @@ using BankAccount.Api.Contracts;
 /// This is just a dictionary.
 /// </summary>
 [State]
-public partial class BankState : State
+public partial class BankState
 {
     /// <summary>
     /// Dictionary of account balances. Key = accountId, Value = balance.
@@ -245,5 +245,79 @@ public class BankAccountTests
         TestContext.WriteLine($"Generated and ran {results.Count} test cases");
         Assert.That(results.All(r => r.Success), Is.True,
             $"Failed: {results.FirstOrDefault(r => !r.Success)?.LastFailureMessage}");
+    }
+
+    // ============================================================
+    // Visualization: Generate state graph DOT file
+    // ============================================================
+
+    /// <summary>
+    /// Generates a DOT file visualizing the state space.
+    /// Run with: dotnet test --filter "VisualizeStateSpace"
+    /// Convert to PNG with: dot -Tpng state-graph.dot -o state-graph.png
+    /// </summary>
+    [Test]
+    public void VisualizeStateSpace()
+    {
+        var spec = CreateSpec();
+        var initialState = new BankState();
+
+        // Define inputs to explore - just alice with a few amounts
+        var inputs = new InputSet
+        {
+            spec.GetOperation<string, ApiResult<decimal>>("CreateAccount").With("alice", "Create(alice)"),
+            spec.GetOperation<(string, decimal), ApiResult<decimal>>("Deposit").With(("alice", 50m), "Deposit(alice, 50)"),
+            spec.GetOperation<(string, decimal), ApiResult<decimal>>("Deposit").With(("alice", 100m), "Deposit(alice, 100)"),
+            spec.GetOperation<(string, decimal), ApiResult<decimal>>("Withdraw").With(("alice", 30m), "Withdraw(alice, 30)"),
+            spec.GetOperation<(string, decimal), ApiResult<decimal>>("Withdraw").With(("alice", 70m), "Withdraw(alice, 70)"),
+            spec.GetOperation<string, ApiResult<decimal>>("DeleteAccount").With("alice", "Delete(alice)"),
+        };
+
+        // Generate DOT visualization
+        var dot = spec.VisualizeStateSpace(
+            initialState,
+            inputs,
+            generationOptions: new TestGenerationOptions 
+            { 
+                MaxDepth = 5,
+                ShouldIncludeTransition = (from, op, to) => from.ToString() != to.ToString()
+            },
+            visualizationOptions: new VisualizationOptions
+            {
+                NodeLabelLambda = node =>
+                {
+                    var state = (BankState)node.State;
+                    if (state.Accounts.Count == 0)
+                        return "Empty";
+                    return string.Join(", ", state.Accounts.Select(kv => $"{kv.Key}: {kv.Value}"));
+                }
+            });
+
+        // Write to file
+        File.WriteAllText("bank-account-state-graph.dot", dot);
+        
+        TestContext.WriteLine("State graph written to: bank-account-state-graph.dot");
+        TestContext.WriteLine("Convert to PNG: dot -Tpng bank-account-state-graph.dot -o bank-account-state-graph.png");
+        TestContext.WriteLine();
+
+        // Also generate test cases to count them
+        var context = spec.CreateTestingContext();
+        var testCases = TestCaseGenerator.GenerateSequentialTestCases(
+            context,
+            initialState,
+            inputs,
+            new TestGenerationOptions { MaxDepth = 5 });
+
+        TestContext.WriteLine($"Generated {testCases.Count} test cases");
+        TestContext.WriteLine();
+        
+        // Show all test cases
+        foreach (var tc in testCases)
+        {
+            var sequence = string.Join(" → ", tc.OperationCalls.Select(op => op.Name));
+            TestContext.WriteLine($"  {sequence}");
+        }
+
+        Assert.IsNotEmpty(dot);
     }
 }

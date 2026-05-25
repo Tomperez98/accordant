@@ -68,11 +68,9 @@ spec.Operation<string, Unit>("DeleteUser", (userId, state) =>
     }
 
     // Case 3: Can delete
-    var newState = (AppState)state.Clone();
-    newState.Users.Remove(userId);
-
     return Expect.That<Unit>(r => true, "Should succeed")
-           .ThenState(newState);
+           .ThenState<AppState>(nextState =>
+               nextState.Users.Remove(userId));
 });
 ```
 
@@ -163,12 +161,12 @@ spec.Operation<TransferRequest, Unit>("TransferMoney", (request, state) =>
                .SameState();
 
     // Success case
-    var newState = (AppState)state.Clone();
-    newState.Accounts[request.FromAccount].Balance -= request.Amount;
-    newState.Accounts[request.ToAccount].Balance += request.Amount;
-
     return Expect.That<Unit>(r => true, "Transfer succeeded")
-           .ThenState(newState);
+           .ThenState<AppState>(nextState =>
+           {
+               nextState.Accounts[request.FromAccount].Balance -= request.Amount;
+               nextState.Accounts[request.ToAccount].Balance += request.Amount;
+           });
 });
 ```
 
@@ -248,4 +246,4 @@ Exceptions are just another expected outcome. The spec describes **all possible 
 ## Full Code Reference
 
 See the complete handling in:
-- [TodoListTests.cs](../../Samples/TodoList/TodoList.Tests/TodoListTests.cs) - Error handling examples
+- [TodoListTests.cs](https://github.com/microsoft/accordant/blob/main/Samples/TodoList/TodoList.Tests/TodoListTests.cs) - Error handling examples

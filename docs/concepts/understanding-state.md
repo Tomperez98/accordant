@@ -15,7 +15,8 @@ Consider a real banking system. The implementation might involve Entity Framewor
 Just the account balances.
 
 ```csharp
-public class BankState : JsonState
+[State]
+public partial class BankState
 {
     public Dictionary<string, decimal> Accounts { get; set; } = new();
 }
@@ -82,12 +83,12 @@ When you write `.ThenState(nextState => ...)`, the `nextState` parameter is alre
 
 This makes state transitions easy to write. You don't need to manually copy anything or worry about accidentally modifying the pre-operation state.
 
-### Advanced: ThenState with ObjectMap
+### Advanced: ThenStateWithMap
 
 For more complex states where objects reference other objects (a graph structure), there's a variant that provides a mapping from original objects to their clones:
 
 ```csharp
-.ThenState<MyState>((nextState, objectMap) => { ... })
+.ThenStateWithMap<MyState>((nextState, objectMap) => { ... })
 ```
 
 The `objectMap` lets you translate references from the original object graph to the cloned graph. Most specs use flat dictionaries and lists and won't need this — but it's available for advanced scenarios.
@@ -104,33 +105,35 @@ Under the hood, Accordant needs to do several things with state objects:
 
 All of this is driven by the **string representation** of the state. Two states with the same string representation are considered identical. This is how Accordant knows it's already explored a particular state and doesn't need to explore it again.
 
-### Using JsonState
+### Using [State]
 
-For most specs, the easiest approach is to inherit from `JsonState`:
+For most specs, the easiest approach is to use the `[State]` attribute with a partial class:
 
 ```csharp
-public class BankState : JsonState
+[State]
+public partial class BankState
 {
     public Dictionary<string, decimal> Accounts { get; set; } = new();
 }
 ```
 
-`JsonState` uses JSON serialization for everything — string representation, equality, and cloning. You just define your data as properties, and it all works automatically.
+The `[State]` attribute triggers source generation that handles cloning, equality, and hashing automatically. You just define your data as properties, and it all works.
 
 The key requirement is simple: **distinct logical states must produce distinct JSON strings.** Just use plain data properties and you're good.
 
 **A note on dictionaries:** Dictionary keys are sorted during serialization to ensure the same logical state always produces the same JSON string. Supported key types are `string`, `int`, `long`, and `Guid`.
 
-### Large Values and JsonAtomic
+### Large Values and [SharedState]
 
-Sometimes state includes large values — like binary image data — where full JSON serialization and deep cloning would be expensive. For these cases, you can mark a property with `[JsonAtomic]`:
+Sometimes state includes large values — like binary image data — where full serialization and deep cloning would be expensive. For these cases, you can use `[SharedState]`:
 
 ```csharp
-public class ImageState : JsonState
+[State]
+public partial class ImageState
 {
     public string Name { get; set; }
     
-    [JsonAtomic(nameof(ContentFingerprint))]
+    [SharedState(nameof(ContentFingerprint))]
     public List<byte> Content { get; set; }
     
     // Fingerprint used for equality/hashing instead of serializing the whole list
@@ -140,7 +143,7 @@ public class ImageState : JsonState
 }
 ```
 
-The `[JsonAtomic]` attribute tells Accordant to:
+The `[SharedState]` attribute tells Accordant to:
 - **Shallow copy** the property during cloning (reference preservation)
 - Use the specified **fingerprint property** for equality and hashing instead of serializing the full value
 
@@ -152,6 +155,6 @@ This keeps cloning fast while still correctly detecting distinct states.
 
 ## Next Steps
 
-- **See states in action** → [Quick Start](../quickstart.md)
+- **See states in action** → [Overview](../index.md)
 - **Define operations on state** → [Tutorial 1: Your First Spec](../tutorials/01-your-first-spec.md)
 - **Understand the broader picture** → [What is Model-Based Testing?](what-is-model-based-testing.md)
