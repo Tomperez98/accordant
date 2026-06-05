@@ -32,6 +32,11 @@ namespace Microsoft.Accordant
             if (initialState == null) throw new ArgumentNullException(nameof(initialState));
             options ??= new TestExecutionOptions();
 
+            foreach (var testCase in testCases)
+            {
+                ValidateSequentialTestCase(testCase);
+            }
+
             var spec = context.Spec;
             var runStartTime = DateTime.UtcNow;
 
@@ -177,6 +182,11 @@ namespace Microsoft.Accordant
             if (context == null) throw new ArgumentNullException(nameof(context));
             if (initialState == null) throw new ArgumentNullException(nameof(initialState));
             options ??= new TestExecutionOptions();
+
+            foreach (var testCase in testCases)
+            {
+                ValidateConcurrentTestCase(testCase);
+            }
 
             var spec = context.Spec;
             var runStartTime = DateTime.UtcNow;
@@ -451,9 +461,26 @@ namespace Microsoft.Accordant
             Dictionary<string, object> operationCallResponses,
             TestExecutionOptions options)
         {
-            var stateProfile = new StateProfile(startingState);
+            return await ExecuteSequentialTestCaseInternal(
+                context,
+                new StateProfile(startingState),
+                operationCalls,
+                operationCallRequests,
+                operationCallResponses,
+                options);
+        }
+
+        private static async Task<(StateProfile, bool, string)> ExecuteSequentialTestCaseInternal(
+            TestingContext context,
+            StateProfile stateProfile,
+            IList<OperationCall> operationCalls,
+            Dictionary<string, object> operationCallRequests,
+            Dictionary<string, object> operationCallResponses,
+            TestExecutionOptions options)
+        {
 
             var numExecutions = new Dictionary<OperationCall, int>();
+            var stepFunctionsBefore = GetStepFunctionsToPollFor(stateProfile);
 
             for (int i = 0; i < operationCalls.Count; i++)
             {
@@ -541,13 +568,14 @@ namespace Microsoft.Accordant
 
                 stateProfile = newStateProfile;
 
-                // Check if any step functions require polling (are TerminatingStepFunction)
-                // and this input hasn't disabled polling
+                // Check if this operation introduced new step functions that require polling.
+                // Only poll for newly introduced ones (not pre-existing from earlier ops that skipped polling).
                 if (!operationCall.OperationInput.SkipPolling)
                 {
-                    var stepFunctionsToPollFor = GetStepFunctionsToPollFor(stateProfile);
+                    var stepFunctionsAfter = GetStepFunctionsToPollFor(stateProfile);
+                    stepFunctionsAfter.ExceptWith(stepFunctionsBefore);
 
-                    if (stepFunctionsToPollFor.Count > 0)
+                    if (stepFunctionsAfter.Count > 0)
                     {
                         var pollingSetup = FetchPollingSetup(operationCall);
                         var pollingOperation = FetchPollingOperation(context, operationCall, request, response);
@@ -557,7 +585,7 @@ namespace Microsoft.Accordant
                             stateProfile,
                             pollingOperation,
                             pollingSetup,
-                            stepFunctionsToPollFor);
+                            stepFunctionsAfter);
 
                         if (!success)
                         {
@@ -565,6 +593,9 @@ namespace Microsoft.Accordant
                         }
                     }
                 }
+
+                // Update snapshot for next iteration
+                stepFunctionsBefore = GetStepFunctionsToPollFor(stateProfile);
             }
 
             return (stateProfile, true, string.Empty);
@@ -576,66 +607,90 @@ namespace Microsoft.Accordant
             ConcurrentTestCase testCase,
             TestExecutionOptions options)
         {
-            Logger.Log($"Executing {testCase.SequentialOperationCalls.Count} sequential operations");
-
             var operationCallRequests = new Dictionary<string, object>();
             var operationCallResponses = new Dictionary<string, object>();
+            var stateProfile = new StateProfile(startingState);
 
-            StateProfile stateProfileAfterSequentialOperations;
-            using (new Logger(indent: true))
+            for (int segmentIndex = 0; segmentIndex < testCase.Segments.Count; segmentIndex++)
             {
-                (stateProfileAfterSequentialOperations, var success, var failureMessage) = await ExecuteSequentialPartOfConcurrentTestInternal(
-                    context,
-                    testCase,
-                    startingState,
-                    operationCallRequests,
-                    operationCallResponses,
-                    options);
+                var segment = testCase.Segments[segmentIndex];
 
-                if (!success)
+                if (segment.IsSequential)
                 {
-                    return (null, false, failureMessage);
+                    Logger.Log($"Executing sequential segment {segmentIndex + 1} of {testCase.Segments.Count}");
+
+                    using (new Logger(indent: true))
+                    {
+                        var (newStateProfile, success, failureMessage) = await ExecuteSequentialTestCaseInternal(
+                            context,
+                            stateProfile,
+                            segment.OperationCalls,
+                            operationCallRequests,
+                            operationCallResponses,
+                            options);
+
+                        if (!success)
+                        {
+                            return (null, false, failureMessage);
+                        }
+
+                        stateProfile = newStateProfile;
+                    }
+                }
+                else
+                {
+                    // Capture step functions before the concurrent segment for diffing
+                    var stepFunctionsBefore = GetStepFunctionsToPollFor(stateProfile);
+
+                    Logger.Log(string.Empty);
+                    Logger.Log($"Executing concurrent segment {segmentIndex + 1} of {testCase.Segments.Count} ({segment.OperationCalls.Count} concurrent operations)");
+                    Logger.Log(string.Empty);
+
+                    using (new Logger(indent: true))
+                    {
+                        var (newStateProfile, success, failureMessage) = await ExecuteConcurrentOperationsInternal(
+                            context,
+                            segment.OperationCalls,
+                            stateProfile,
+                            operationCallRequests,
+                            operationCallResponses,
+                            options);
+
+                        if (!success)
+                        {
+                            return (null, false, failureMessage);
+                        }
+
+                        stateProfile = newStateProfile;
+
+                        // Poll for any newly introduced terminating step functions
+                        var stepFunctionsAfter = GetStepFunctionsToPollFor(stateProfile);
+                        var newStepFunctions = new HashSet<TerminatingStepFunction>(
+                            stepFunctionsAfter.Where(sf => !stepFunctionsBefore.Contains(sf)));
+
+                        if (newStepFunctions.Count > 0)
+                        {
+                            Logger.Log(string.Empty);
+                            Logger.Log($"Found {newStepFunctions.Count} new terminating step function(s) after concurrent segment. Polling...");
+
+                            (stateProfile, success, failureMessage) = await PollAfterConcurrentSegment(
+                                context,
+                                stateProfile,
+                                segment.OperationCalls,
+                                newStepFunctions,
+                                operationCallRequests,
+                                operationCallResponses);
+
+                            if (!success)
+                            {
+                                return (null, false, failureMessage);
+                            }
+                        }
+                    }
                 }
             }
 
-            Logger.Log(string.Empty);
-            Logger.Log($"Executing {testCase.ConcurrentOperationCalls.Count} concurrent operations");
-            Logger.Log(string.Empty);
-
-            using (new Logger(indent: true))
-            {
-                var (stateProfile, success, failureMessage) = await ExecuteConcurrentOperationsInternal(
-                    context,
-                    testCase.ConcurrentOperationCalls,
-                    stateProfileAfterSequentialOperations,
-                    operationCallRequests,
-                    operationCallResponses,
-                    options);
-
-                return (stateProfile, success, failureMessage);
-            }
-        }
-
-        private static async Task<(StateProfile, bool, string)> ExecuteSequentialPartOfConcurrentTestInternal(
-            TestingContext context,
-            ConcurrentTestCase testCase,
-            IState startingState,
-            Dictionary<string, object> operationCallRequests,
-            Dictionary<string, object> operationCallResponses,
-            TestExecutionOptions options)
-        {
-            var (stateProfileAfterSequentialOperations, success, failureMessage) = await ExecuteSequentialTestCaseInternal(
-                context,
-                startingState,
-                testCase.SequentialOperationCalls,
-                operationCallRequests,
-                operationCallResponses,
-                options);
-
-            return (
-                stateProfileAfterSequentialOperations,
-                success,
-                failureMessage);
+            return (stateProfile, true, string.Empty);
         }
 
         private static async Task<(StateProfile, bool, string)> ExecuteConcurrentOperationsInternal(
@@ -865,6 +920,218 @@ namespace Microsoft.Accordant
             }
 
             return (stateProfile, true, string.Empty);
+        }
+
+        /// <summary>
+        /// Validates a sequential test case before execution. Checks:
+        /// - Must have at least one operation call
+        /// - No duplicate operation call names
+        /// </summary>
+        private static void ValidateSequentialTestCase(SequentialTestCase testCase)
+        {
+            if (testCase.OperationCalls == null || testCase.OperationCalls.Count == 0)
+            {
+                throw new ArgumentException(
+                    $"Sequential test case '{testCase.Description}' has no operation calls. " +
+                    $"Each test case must have at least one operation call.");
+            }
+
+            var allNames = new HashSet<string>();
+            foreach (var operationCall in testCase.OperationCalls)
+            {
+                if (!allNames.Add(operationCall.Name))
+                {
+                    throw new ArgumentException(
+                        $"Duplicate operation call name '{operationCall.Name}' found in sequential test case '{testCase.Description}'. " +
+                        $"Operation call names must be unique.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Validates a concurrent test case before execution. Checks:
+        /// - No empty segments
+        /// - No duplicate operation call names across all segments
+        /// - No same-segment derived request dependencies in concurrent segments
+        /// </summary>
+        private static void ValidateConcurrentTestCase(ConcurrentTestCase testCase)
+        {
+            if (testCase.Segments == null || testCase.Segments.Count == 0)
+            {
+                throw new ArgumentException(
+                    $"Concurrent test case '{testCase.Description}' has no segments. " +
+                    $"Each test case must have at least one segment.");
+            }
+
+            var allOperationCallNames = new HashSet<string>();
+
+            for (int segmentIndex = 0; segmentIndex < testCase.Segments.Count; segmentIndex++)
+            {
+                var segment = testCase.Segments[segmentIndex];
+
+                if (segment.OperationCalls == null || segment.OperationCalls.Count == 0)
+                {
+                    throw new ArgumentException(
+                        $"Segment {segmentIndex + 1} has no operation calls. Each segment must have at least one operation call.");
+                }
+
+                foreach (var operationCall in segment.OperationCalls)
+                {
+                    if (!allOperationCallNames.Add(operationCall.Name))
+                    {
+                        throw new ArgumentException(
+                            $"Duplicate operation call name '{operationCall.Name}' found in test case '{testCase.Description}'. " +
+                            $"Operation call names must be unique across all segments.");
+                    }
+                }
+
+                // For concurrent segments, check that no operation derives from another in the same segment
+                if (segment.IsConcurrent)
+                {
+                    var segmentOperationCallNames = new HashSet<string>(
+                        segment.OperationCalls.Select(c => c.Name));
+
+                    foreach (var operationCall in segment.OperationCalls)
+                    {
+                        var derivedFrom = operationCall.OperationInput?.DerivedFromOperationCalls;
+                        if (derivedFrom != null)
+                        {
+                            foreach (var source in derivedFrom)
+                            {
+                                if (segmentOperationCallNames.Contains(source.Name))
+                                {
+                                    throw new ArgumentException(
+                                        $"Operation call '{operationCall.Name}' in concurrent segment {segmentIndex + 1} " +
+                                        $"derives from '{source.Name}' which is in the same segment. " +
+                                        $"Concurrent operations cannot derive from each other within the same segment.");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Polls after a concurrent segment completes. Gathers polling operations from
+        /// all concurrent operation calls that have polling configured and SkipPolling is false,
+        /// then polls sequentially until all newly introduced terminating step functions
+        /// reach their terminal state.
+        /// </summary>
+        private static async Task<(StateProfile, bool, string)> PollAfterConcurrentSegment(
+            TestingContext context,
+            StateProfile stateProfile,
+            IList<OperationCall> concurrentOperationCalls,
+            HashSet<TerminatingStepFunction> stepFunctionsToPollFor,
+            Dictionary<string, object> operationCallRequests,
+            Dictionary<string, object> operationCallResponses)
+        {
+            // Gather polling operations from all concurrent ops that have polling configured
+            var pollingEntries = new List<(OperationInput pollingOperation, PollingSetup pollingSetup)>();
+
+            foreach (var operationCall in concurrentOperationCalls)
+            {
+                if (operationCall.OperationInput.SkipPolling)
+                {
+                    continue;
+                }
+
+                // Check if this operation has a polling setup
+                var pollingSetup = operationCall.OperationInput.Polling
+                                ?? operationCall.OperationInput.Operation.Polling;
+
+                if (pollingSetup == null)
+                {
+                    continue;
+                }
+
+                var request = operationCallRequests.ContainsKey(operationCall.Name)
+                    ? operationCallRequests[operationCall.Name]
+                    : operationCall.OperationInput.Request;
+                var response = operationCallResponses.ContainsKey(operationCall.Name)
+                    ? operationCallResponses[operationCall.Name]
+                    : null;
+
+                var pollingOperation = FetchPollingOperation(context, operationCall, request, response);
+                pollingEntries.Add((pollingOperation, pollingSetup));
+            }
+
+            if (pollingEntries.Count == 0)
+            {
+                Logger.Log("No polling operations configured for concurrent segment.");
+                return (stateProfile, true, string.Empty);
+            }
+
+            Logger.Log($"Polling with {pollingEntries.Count} polling operation(s) after concurrent segment.");
+
+            // Create a minimal options object for polling (no retry, no step executed hook)
+            var pollingOptions = new TestExecutionOptions();
+
+            // Track retry counts per polling entry and which ones are exhausted
+            var retryCounts = new int[pollingEntries.Count];
+            var exhausted = new bool[pollingEntries.Count];
+
+            while (true)
+            {
+                // Execute each non-exhausted polling operation sequentially
+                for (int i = 0; i < pollingEntries.Count; i++)
+                {
+                    if (exhausted[i])
+                    {
+                        continue;
+                    }
+
+                    var (pollingOperation, pollingSetup) = pollingEntries[i];
+
+                    retryCounts[i]++;
+
+                    if (retryCounts[i] > pollingSetup.MaxRetryCount)
+                    {
+                        Logger.Log($"Polling operation {pollingOperation.Name} exhausted its retry count ({pollingSetup.MaxRetryCount}).");
+                        exhausted[i] = true;
+                        continue;
+                    }
+
+                    Logger.Log($"Polling by calling {pollingOperation.Name}");
+
+                    using (new Logger(indent: true))
+                    {
+                        var (newStateProfile, valid, message, pollingResponse) = await ExecuteOperationCallAsync(
+                            context,
+                            stateProfile,
+                            pollingOperation.Name,
+                            pollingOperation.Operation,
+                            pollingOperation.Request,
+                            pollingOptions);
+
+                        stateProfile = newStateProfile;
+                    }
+                }
+
+                // Check if all specified TerminatingStepFunctions have reached their terminal state
+                if (AllTerminatingStepFunctionsComplete(stateProfile, stepFunctionsToPollFor))
+                {
+                    Logger.Log("All terminating step functions have completed after concurrent segment polling.");
+                    return (stateProfile, true, string.Empty);
+                }
+
+                // If all pollers are exhausted and step functions still pending, fail
+                if (exhausted.All(e => e))
+                {
+                    var failureMessage =
+                        $"Gave up polling after all polling operations exhausted their retry counts. " +
+                        $"Some TerminatingStepFunctions did not reach their terminal state.";
+
+                    return (stateProfile, false, failureMessage);
+                }
+
+                // Wait using the maximum delay across non-exhausted polling entries
+                var activeEntries = pollingEntries.Where((_, i) => !exhausted[i]).ToList();
+                var maxWaitTime = activeEntries.Max(e => e.pollingSetup.WaitTimeInMs);
+                await Task.Delay(maxWaitTime);
+
+                LogPendingStepFunctions(stateProfile, stepFunctionsToPollFor);
+            }
         }
 
         /// <summary>
