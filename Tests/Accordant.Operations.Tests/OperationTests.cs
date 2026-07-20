@@ -911,6 +911,256 @@ public class OperationTests
     }
 
     /// <summary>
+    /// Tests AllowsConcurrent with happens-before edges, enabling linearizability
+    /// checking for partially ordered histories.
+    ///
+    /// Scenario: Write always succeeds and sets state; Read expects response == state.
+    ///   State starts at Value=0.
+    ///   A: Write(1), observed="ok"  (always succeeds)
+    ///   B: Read(),  observed=1      (must see state=1)
+    ///   C: Read(),  observed=1      (must see state=1)
+    ///
+    /// Without edge: [A,B,C] and [A,C,B] both work → true.
+    /// With edge C→A: C must precede A, but C needs A's write → deadlock → false.
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_PrunesInvalidOrderings()
+    {
+        var spec = new Spec<CounterState>();
+
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        spec.Operation<Unit, int>("Read", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue(state.Value),
+                state));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var readOp = spec.GetOperation<Unit, int>("Read");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),         // A: Write(1)
+            (readOp, Unit.Value, 1),     // B: Read() observed=1
+            (readOp, Unit.Value, 1),     // C: Read() observed=1
+        };
+
+        // Without edge: valid (A writes 1, both reads see 1)
+        var (noEdgeValid, _, _) = spec.AllowsConcurrent(stateProfile, calls);
+        Assert.IsTrue(noEdgeValid,
+            "Without edge, [A,B,C] and [A,C,B] both work.");
+
+        // With edge C→A: C must precede A, but C needs A's write → no valid ordering
+        var (withEdgeValid, withEdgeMsg, _) = spec.AllowsConcurrent(
+            stateProfile, calls,
+            new[] { (2, 0) });  // C(index 2) → A(index 0)
+
+        Assert.IsFalse(withEdgeValid,
+            "With edge C→A, C must run first but needs state=1 from A. " +
+            $"Got: {withEdgeMsg}");
+    }
+
+    /// <summary>
+    /// Tests that a happens-before edge satisfied by all valid orderings
+    /// doesn't change the result.
+    ///
+    /// Same Write/Read setup as above.
+    /// Edge A→C is already true in every valid ordering (A must write before any Read sees 1),
+    /// so the result is unchanged.
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_RedundantEdgeDoesNotChangeResult()
+    {
+        var spec = new Spec<CounterState>();
+
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        spec.Operation<Unit, int>("Read", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue(state.Value),
+                state));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var readOp = spec.GetOperation<Unit, int>("Read");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),
+            (readOp, Unit.Value, 1),
+            (readOp, Unit.Value, 1),
+        };
+
+        var (withEdgeValid, _, nextProfile) = spec.AllowsConcurrent(
+            stateProfile,
+            calls,
+            [(0, 2)]); // A→C (already true in all valid orderings)
+
+        Assert.IsTrue(withEdgeValid,
+            "Edge A→C is trivially satisfied — A must write before any Read sees 1.");
+        Assert.IsNotNull(nextProfile);
+    }
+
+    /// <summary>
+    /// Tests a transitive happens-before chain where one operation is both a
+    /// predecessor and a dependent (A→B→C). This exercises the GUID stability fix:
+    /// when B gets predecessor IDs wired, it must keep its original StepFunctionId
+    /// so that C's reference to B remains valid.
+    ///
+    /// Scenario: Write sets state to request value; Read expects response == state.
+    ///   State starts at Value=0.
+    ///   A: Write(1), observed="ok"
+    ///   B: Write(2), observed="ok"
+    ///   C: Read(),  observed=2  (must see B's write, not A's)
+    ///
+    /// With edges A→B and B→C, only [A,B,C] is a valid ordering.
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_TransitiveChain()
+    {
+        var spec = new Spec<CounterState>();
+
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        spec.Operation<Unit, int>("Read", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue(state.Value),
+                state));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var readOp = spec.GetOperation<Unit, int>("Read");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),         // A: Write(1)
+            (writeOp, 2, "ok"),         // B: Write(2)
+            (readOp, Unit.Value, 2),     // C: Read() observed=2
+        };
+
+        // With edges A→B and B→C: only [A,B,C] works.
+        // B is both a predecessor (to C) and a dependent (of A); its GUID
+        // must stay stable when predecessor IDs are wired.
+        var (valid, _, nextProfile) = spec.AllowsConcurrent(
+            stateProfile, calls,
+            new[] { (0, 1), (1, 2) });  // A→B, B→C
+
+        Assert.IsTrue(valid,
+            "With edges A→B and B→C, [A,B,C] is a valid ordering.");
+        Assert.IsNotNull(nextProfile);
+    }
+
+    /// <summary>
+    /// Tests multiple happens-before predecessors for a single operation (A→C, B→C).
+    /// C must wait for both A and B before it can be applied.
+    ///
+    /// Scenario: Write sets state; Read expects response == state.
+    ///   State starts at Value=0.
+    ///   A: Write(1), observed="ok"
+    ///   B: Write(2), observed="ok"
+    ///   C: Read(),  observed=2  (must see B's write after A's)
+    ///
+    /// With edges A→C and B→C, valid orderings are [A,B,C] and [B,A,C].
+    /// In both cases C sees state=2 (B overwrites A's value).
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_MultiplePredecessors()
+    {
+        var spec = new Spec<CounterState>();
+
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        spec.Operation<Unit, int>("Read", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue(state.Value),
+                state));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var readOp = spec.GetOperation<Unit, int>("Read");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),         // A: Write(1)
+            (writeOp, 2, "ok"),         // B: Write(2)
+            (readOp, Unit.Value, 2),     // C: Read() observed=2
+        };
+
+        var (valid, _, nextProfile) = spec.AllowsConcurrent(
+            stateProfile, calls,
+            new[] { (0, 2), (1, 2) });  // A→C, B→C
+
+        Assert.IsTrue(valid,
+            "With edges A→C and B→C, both [A,B,C] and [B,A,C] are valid.");
+        Assert.IsNotNull(nextProfile);
+    }
+
+    /// <summary>
+    /// Tests that a self-loop edge throws ArgumentException.
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_SelfLoopThrows()
+    {
+        var spec = new Spec<CounterState>();
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),
+        };
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            spec.AllowsConcurrent(stateProfile, calls, new[] { (0, 0) }));
+
+        Assert.That(ex.Message, Does.Contain("Self-loop"));
+    }
+
+    /// <summary>
+    /// Tests that an out-of-range happens-before index throws ArgumentException.
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_OutOfRangeIndexThrows()
+    {
+        var spec = new Spec<CounterState>();
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),
+        };
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            spec.AllowsConcurrent(stateProfile, calls, new[] { (0, 1) }));
+
+        Assert.That(ex.Message, Does.Contain("outside the range"));
+    }
+
+    /// <summary>
     /// Tests that ExplainInvalidResponse path throws when spec has a bug.
     /// When response doesn't match and Apply throws during explanation.
     /// Note: ExplainInvalidResponse calls Apply directly (not through SystemChecker.Validate),
