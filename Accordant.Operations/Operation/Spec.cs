@@ -316,6 +316,8 @@ public class Spec<TState> : ISpec where TState : class, IState
         if (happensBefore != null)
         {
             var preds = new Dictionary<int, List<string>>();
+            var succ = new List<int>[steps.Length];
+            var inDegree = new int[steps.Length];
             foreach (var (before, after) in happensBefore)
             {
                 if (before == after)
@@ -333,9 +335,14 @@ public class Spec<TState> : ISpec where TState : class, IState
                 }
 
                 if (!preds.ContainsKey(after))
-                    preds[after] = new List<string>();
+                    preds[after] = [];
                 preds[after].Add(steps[before].StepFunctionId);
+
+                (succ[before] ??= []).Add(after);
+                inDegree[after]++;
             }
+
+            ThrowIfCyclic(succ, inDegree);
 
             for (int i = 0; i < steps.Length; i++)
             {
@@ -368,6 +375,44 @@ public class Spec<TState> : ISpec where TState : class, IState
 
             return (false, failureMessage, null);
         }
+    }
+
+    /// <summary>
+    /// Kahn's algorithm: drain nodes with no remaining predecessors. Any node
+    /// still holding in-degree &gt; 0 afterwards belongs to (or feeds) a cycle.
+    /// O(V+E), negligible for the small N this method handles (linearizability
+    /// itself is O(N!)). Mutates <paramref name="inDegree"/>.
+    /// </summary>
+    private static void ThrowIfCyclic(List<int>[] succ, int[] inDegree)
+    {
+        var queue = new Queue<int>();
+        for (int i = 0; i < inDegree.Length; i++)
+        {
+            if (inDegree[i] == 0) queue.Enqueue(i);
+        }
+
+        int visited = 0;
+        while (queue.Count > 0)
+        {
+            var n = queue.Dequeue();
+            visited++;
+            if (succ[n] == null) continue;
+            foreach (var m in succ[n])
+            {
+                if (--inDegree[m] == 0) queue.Enqueue(m);
+            }
+        }
+
+        if (visited == inDegree.Length) return;
+
+        var cycle = new List<int>();
+        for (int i = 0; i < inDegree.Length; i++)
+        {
+            if (inDegree[i] > 0) cycle.Add(i);
+        }
+        throw new ArgumentException(
+            $"Cycle in happens-before constraints involving indices [{string.Join(", ", cycle)}]: " +
+            $"no linearization can satisfy a cyclic ordering.");
     }
 
     #endregion

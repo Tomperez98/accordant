@@ -1135,6 +1135,97 @@ public class OperationTests
     }
 
     /// <summary>
+    /// Tests that a cycle in happens-before edges throws early, rather than
+    /// letting the linearization search fail with a misleading "no ordering" message.
+    /// </summary>
+    [Test]
+    public void AllowsConcurrent_WithHappensBefore_CycleThrows()
+    {
+        var spec = new Spec<CounterState>();
+        spec.Operation<int, string>("Write", (request, state) =>
+            new ExpectedOutcome(
+                Descriptor.FromValue("ok"),
+                new CounterState(request)));
+
+        var writeOp = spec.GetOperation<int, string>("Write");
+        var stateProfile = new StateProfile(new CounterState(0));
+
+        var calls = new (IOperation, object, object)[]
+        {
+            (writeOp, 1, "ok"),
+            (writeOp, 2, "ok"),
+            (writeOp, 3, "ok"),
+        };
+
+        // 0 -> 1 -> 2 -> 0 is a cycle.
+        var ex = Assert.Throws<ArgumentException>(() =>
+            spec.AllowsConcurrent(stateProfile, calls, new[] { (0, 1), (1, 2), (2, 0) }));
+
+        Assert.That(ex.Message, Does.Contain("Cycle"));
+    }
+
+    #region Kahn's algorithm cycle-detection tests
+
+    /// <summary>
+    /// Runs AllowsConcurrent with N idempotent no-op calls and the given edges.
+    /// The operation returns a fixed response and leaves state unchanged, so any
+    /// acyclic edge set linearizes. A "Cycle" ArgumentException therefore comes
+    /// purely from Kahn's, not from linearization failure.
+    /// </summary>
+    private static ArgumentException RunHappensBefore(int n, params (int, int)[] edges)
+    {
+        var spec = new Spec<CounterState>();
+        spec.Operation<int, string>("Noop", (request, state) =>
+            new ExpectedOutcome(Descriptor.FromValue("ok"), state));
+
+        var op = spec.GetOperation<int, string>("Noop");
+        var stateProfile = new StateProfile(new CounterState(0));
+        var calls = new (IOperation, object, object)[n];
+        for (int i = 0; i < n; i++) calls[i] = (op, i, "ok");
+
+        try
+        {
+            var (valid, _, _) = spec.AllowsConcurrent(stateProfile, calls, edges);
+            Assert.IsTrue(valid);
+            return null;
+        }
+        catch (ArgumentException ex) { return ex; }
+    }
+
+    [Test]
+    public void Kahn_Diamond_IsAcyclic()
+    {
+        // 0→1, 0→2, 1→3, 2→3. Node 3 has in-degree 2.
+        // Catches enqueue-on-first-decrement bugs and reversed-edge-direction bugs.
+        Assert.IsNull(RunHappensBefore(4, (0, 1), (0, 2), (1, 3), (2, 3)));
+    }
+
+    [Test]
+    public void Kahn_TwoNodeCycle_IsDetected()
+    {
+        // Smallest non-self cycle. Catches implementations that only see self-loops.
+        var ex = RunHappensBefore(2, (0, 1), (1, 0));
+        Assert.That(ex?.Message, Does.Contain("Cycle"));
+    }
+
+    [Test]
+    public void Kahn_CycleWithTail_ReportsOnlyCycleMembers()
+    {
+        // 0→1→2→3, 3→1. Node 0 drains; {1,2,3} stay stuck.
+        // Catches missed cycles AND wrongly blamed drainable nodes.
+        var ex = RunHappensBefore(4, (0, 1), (1, 2), (2, 3), (3, 1));
+        Assert.That(ex?.Message, Does.Contain("Cycle"));
+
+        var start = ex.Message.IndexOf('[');
+        var end = ex.Message.IndexOf(']');
+        var listed = ex.Message.Substring(start + 1, end - start - 1)
+            .Split(',').Select(s => s.Trim()).ToArray();
+        CollectionAssert.AreEquivalent(new[] { "1", "2", "3" }, listed);
+    }
+
+    #endregion
+
+    /// <summary>
     /// Tests that an out-of-range happens-before index throws ArgumentException.
     /// </summary>
     [Test]
