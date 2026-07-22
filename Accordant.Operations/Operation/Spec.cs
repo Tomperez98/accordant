@@ -313,10 +313,10 @@ public class Spec<TState> : ISpec where TState : class, IState
                 c.request, c.response, c.operation.Verify))
             .ToArray();
 
-        if (happensBefore != null)
+        if (happensBefore != null && happensBefore.Count() > 0)
         {
-            var preds = new Dictionary<int, List<string>>();
-            var succ = new List<int>[steps.Length];
+            var predecessorIds = new Dictionary<int, List<string>>();
+            var successors = new Dictionary<int, List<int>>();
             var inDegree = new int[steps.Length];
             foreach (var (before, after) in happensBefore)
             {
@@ -334,21 +334,23 @@ public class Spec<TState> : ISpec where TState : class, IState
                         $"outside the range [0, {steps.Length - 1}].");
                 }
 
-                if (!preds.ContainsKey(after))
-                    preds[after] = [];
-                preds[after].Add(steps[before].StepFunctionId);
+                if (!predecessorIds.ContainsKey(after))
+                    predecessorIds[after] = [];
+                predecessorIds[after].Add(steps[before].StepFunctionId);
 
-                (succ[before] ??= []).Add(after);
+                if (!successors.ContainsKey(before))
+                    successors[before] = [];
+                successors[before].Add(after);
                 inDegree[after]++;
             }
 
-            ThrowIfCyclic(succ, inDegree);
+            ThrowIfCyclic(successors, inDegree);
 
             for (int i = 0; i < steps.Length; i++)
             {
-                if (preds.TryGetValue(i, out var predecessorIds))
+                if (predecessorIds.TryGetValue(i, out var ids))
                 {
-                    steps[i].SetPredecessorIds(predecessorIds);
+                    steps[i].SetPredecessorIds(ids);
                 }
             }
         }
@@ -383,7 +385,7 @@ public class Spec<TState> : ISpec where TState : class, IState
     /// O(V+E), negligible for the small N this method handles (linearizability
     /// itself is O(N!)). Mutates <paramref name="inDegree"/>.
     /// </summary>
-    private static void ThrowIfCyclic(List<int>[] succ, int[] inDegree)
+    private static void ThrowIfCyclic(Dictionary<int, List<int>> successors, int[] inDegree)
     {
         var queue = new Queue<int>();
         for (int i = 0; i < inDegree.Length; i++)
@@ -396,8 +398,8 @@ public class Spec<TState> : ISpec where TState : class, IState
         {
             var n = queue.Dequeue();
             visited++;
-            if (succ[n] == null) continue;
-            foreach (var m in succ[n])
+            if (!successors.TryGetValue(n, out var succList)) continue;
+            foreach (var m in succList)
             {
                 if (--inDegree[m] == 0) queue.Enqueue(m);
             }
